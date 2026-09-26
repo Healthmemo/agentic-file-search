@@ -1,0 +1,65 @@
+{
+  "predict.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [
+      {
+        "case_id": "case_spike_acme_0142",
+        "questions_json": "[{\"question_key\": \"Q1\", \"text\": \"What is the history of the claimed injury of 14 March 2022?\"}, {\"question_key\": \"Q2\", \"text\": \"List current medications and who prescribed them.\"}]",
+        "facts_json": "[{\"fact_id\": \"F_med_1\", \"local_fact_key\": \"F_med_1\", \"fact_text\": \"As of 12 Jan 2023 GP review, claimantant was taking tramadol 50 mg BD.\", \"fact_type\": \"medication\", \"confidence\": 0.92, \"canonical_page_id\": \"page_a91\", \"page_number\": 2}, {\"fact_id\": \"F_hist_merged_1\", \"local_fact_key\": \"F_hist_merged_1\", \"fact_text\": \"Claimant slipped on oil in the warehouse on 14 March 2022 with immediate low back pain radiating to the left leg.\", \"fact_type\": \"injury_mechanism\", \"confidence\": 0.9, \"canonical_page_id\": \"page_ed_2\", \"page_number\": 2}]",
+        "min_relevance": 0.55,
+        "links_json": "[{\"question_key\": \"Q1\", \"fact_id\": \"F_hist_merged_1\", \"relevance\": 0.95, \"role\": \"support\", \"reason\": \"Merged injury narrative answers history question\"}, {\"question_key\": \"Q2\", \"fact_id\": \"F_med_1\", \"relevance\": 0.91, \"role\": \"support\", \"reason\": \"Medication fact answers Q2\"}]",
+        "question_coverage_json": "[{\"question_key\": \"Q1\", \"status\": \"partial\", \"gap_note\": \"Mechanism covered; investigations not linked\"}, {\"question_key\": \"Q2\", \"status\": \"partial\", \"gap_note\": \"Dose present; prescriber gap remains\"}]"
+      },
+      {
+        "case_id": "case_spike_acme_0142",
+        "questions_json": "[{\"question_key\": \"Q1\", \"text\": \"What is the history of the claimed injury of 14 March 2022?\"}, {\"question_key\": \"Q2\", \"text\": \"List current medications and who prescribed them.\"}]",
+        "facts_json": "[{\"fact_id\": \"F_med_1\", \"local_fact_key\": \"F_med_1\", \"fact_text\": \"As of 12 Jan 2023 GP review, claimantant was taking tramadol 50 mg BD.\", \"fact_type\": \"medication\", \"confidence\": 0.92, \"canonical_page_id\": \"page_a91\", \"page_number\": 2}]",
+        "min_relevance": 0.55,
+        "links_json": "[{\"question_key\": \"Q2\", \"fact_id\": \"F_med_1\", \"relevance\": 0.91, \"role\": \"support\", \"reason\": \"States tramadol dose for current medications question\"}]",
+        "question_coverage_json": "[{\"question_key\": \"Q1\", \"status\": \"uncovered\", \"gap_note\": \"No injury facts in this example\"}, {\"question_key\": \"Q2\", \"status\": \"partial\", \"gap_note\": \"Dose present; prescriber may still be missing\"}]"
+      }
+    ],
+    "signature": {
+      "instructions": "Link extracted facts to questions with relevance, role, and coverage gaps.\n\nDo not invent fact_ids. Prefer direct evidence. Roles: support|context|conflict.",
+      "fields": [
+        {
+          "prefix": "Case Id:",
+          "description": "${case_id}"
+        },
+        {
+          "prefix": "Questions Json:",
+          "description": "JSON list of {question_key, text, ...} — only these questions"
+        },
+        {
+          "prefix": "Facts Json:",
+          "description": "JSON list of facts with fact_id (or local_fact_key), fact_text, fact_type, confidence, canonical_page_id, page_number"
+        },
+        {
+          "prefix": "Min Relevance:",
+          "description": "Minimum relevance 0–1 to include a link (default 0.55)"
+        },
+        {
+          "prefix": "Reasoning:",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Links Json:",
+          "description": "JSON list of {question_key, fact_id, relevance, role (support|context|conflict), reason}"
+        },
+        {
+          "prefix": "Question Coverage Json:",
+          "description": "JSON list of {question_key, status (covered|partial|uncovered), gap_note}"
+        }
+      ]
+    },
+    "lm": null
+  },
+  "metadata": {
+    "dependency_versions": {
+      "python": "3.13",
+      "dspy": "3.4.0",
+      "cloudpickle": "3.1"
+    }
+  }
+}

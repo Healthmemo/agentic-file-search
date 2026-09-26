@@ -46,3 +46,4 @@ dev = [
 explore = "fs_explorer.main:app"
 explore-ui = "fs_explorer.server:run_server"
 explore-dspy-spike = "fs_explorer.dspy_spike.cli:main"
+explore-dspy-optimize = "fs_explorer.dspy_spike.optimize.runner:main"
