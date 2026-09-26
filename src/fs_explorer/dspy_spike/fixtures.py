@@ -15,6 +15,7 @@ FIXTURE_TARGET_CATEGORY = "medications"
 FIXTURE_SECTION_HINT = "medications"
 FIXTURE_ALLOWED_FACT_TYPES = "medication,injury_mechanism,presentation"
 FIXTURE_MIN_RELEVANCE = 0.55
+FIXTURE_INDEX_EVENT_DATE = "2022-03-14"
 FIXTURE_HOUSE_RULE_CANONICAL = (
     "Prefer the page where the claim is most complete; if equal, "
     "prefer the lowest page_number within the same document."

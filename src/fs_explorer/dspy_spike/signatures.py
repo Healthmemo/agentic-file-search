@@ -109,6 +109,37 @@ class LinkCrossPageFacts(dspy.Signature):
     )
 
 
+class MapFactSections(dspy.Signature):
+    """Map facts into report sections for drafting support.
+
+    Sections: history | past_history | social | medications | treatment | employment.
+    One primary_section required per fact; secondary_sections optional.
+    """
+
+    case_id: str = dspy.InputField()
+    index_event_date: str = dspy.InputField(
+        desc="Index event date (ISO) to distinguish history vs past_history"
+    )
+    facts_json: str = dspy.InputField(
+        desc=(
+            "JSON list of post-merge facts with fact_id, fact_text, fact_type, "
+            "confidence, canonical_page_id, optional event_date"
+        )
+    )
+    mappings_json: str = dspy.OutputField(
+        desc=(
+            "JSON list of {fact_id, primary_section, secondary_sections, "
+            "confidence, reason}"
+        )
+    )
+    section_summaries_json: str = dspy.OutputField(
+        desc=(
+            "JSON list of {section, fact_count, coverage "
+            "(empty|sparse|adequate|rich), note} for all six sections"
+        )
+    )
+
+
 class LinkQuestionsToFacts(dspy.Signature):
     """Link extracted facts to questions with relevance, role, and coverage gaps.
 

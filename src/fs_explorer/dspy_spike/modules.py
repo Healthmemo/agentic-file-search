@@ -1,4 +1,12 @@
-"""DSPy modules: search → categorize → extract → cross-page → question–fact link."""
+"""DSPy modules: search → categorize → extract → cross-page → section map → Q–fact link.
+
+Orchestrator order after retrieval:
+extract → cross-page merge → **section map** → **question–fact link**.
+
+Section mapping and question linking both consume the same post-merge ``facts``.
+Section map runs first so drafting tags are available before question coverage;
+question linking does not depend on section tags.
+"""
 
 from __future__ import annotations
 
@@ -23,6 +31,7 @@ from .signatures import (
     GenerateSearchTerms,
     LinkCrossPageFacts,
     LinkQuestionsToFacts,
+    MapFactSections,
 )
 
 DEFAULT_MIN_RELEVANCE = 0.55
@@ -31,11 +40,20 @@ DEFAULT_HOUSE_RULE_CANONICAL = (
     "prefer the lowest page_number within the same document."
 )
 DEFAULT_CROSS_PAGE_TASK_ID = "T_cross_page"
+DEFAULT_INDEX_EVENT_DATE = ""
+REPORT_SECTIONS = (
+    "history",
+    "past_history",
+    "social",
+    "medications",
+    "treatment",
+    "employment",
+)
 
 
 @dataclass
 class PipelineResult:
-    """Structured result of retrieve→categorize→extract→cross-page→question link."""
+    """Structured result of retrieve→extract→cross-page→section map→question link."""
 
     queries: list[dict[str, Any]] = field(default_factory=list)
     stop_conditions: dict[str, Any] = field(default_factory=dict)
@@ -49,6 +67,8 @@ class PipelineResult:
     merged_facts: list[dict[str, Any]] = field(default_factory=list)
     unmerged_fact_keys: list[str] = field(default_factory=list)
     page_link_requests: list[dict[str, Any]] = field(default_factory=list)
+    mappings: list[dict[str, Any]] = field(default_factory=list)
+    section_summaries: list[dict[str, Any]] = field(default_factory=list)
     links: list[dict[str, Any]] = field(default_factory=list)
     question_coverage: list[dict[str, Any]] = field(default_factory=list)
     raw: Any | None = None
@@ -146,7 +166,7 @@ def apply_cross_page_merges(
     merged_facts: list[dict[str, Any]],
     unmerged_fact_keys: list[str],
 ) -> list[dict[str, Any]]:
-    """Collapse merge output into the fact list passed to question–fact linking."""
+    """Collapse merge output into the fact list for section map + question link."""
     by_key = {
         str(f.get("local_fact_key") or f.get("fact_id")): f for f in candidate_facts
     }
@@ -175,6 +195,29 @@ def apply_cross_page_merges(
     if not out:
         return normalize_facts_for_linking(candidate_facts)
     return normalize_facts_for_linking(out)
+
+
+def empty_section_summaries(note: str = "No facts to map") -> list[dict[str, Any]]:
+    """All six report sections with empty coverage (prompt-pack empty-facts behavior)."""
+    return [
+        {
+            "section": section,
+            "fact_count": 0,
+            "coverage": "empty",
+            "note": note,
+        }
+        for section in REPORT_SECTIONS
+    ]
+
+
+def coverage_label(fact_count: int) -> str:
+    if fact_count <= 0:
+        return "empty"
+    if fact_count == 1:
+        return "sparse"
+    if fact_count <= 3:
+        return "adequate"
+    return "rich"
 
 
 class SearchTermGenerator(dspy.Module):
@@ -269,6 +312,26 @@ class CrossPageLinker(dspy.Module):
         )
 
 
+class SectionMapper(dspy.Module):
+    """Thin wrapper around MapFactSections."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.predict = dspy.Predict(MapFactSections)
+
+    def forward(
+        self,
+        case_id: str,
+        index_event_date: str,
+        facts_json: str,
+    ) -> dspy.Prediction:
+        return self.predict(
+            case_id=case_id,
+            index_event_date=index_event_date,
+            facts_json=facts_json,
+        )
+
+
 class QuestionFactLinker(dspy.Module):
     """Thin wrapper around LinkQuestionsToFacts."""
 
@@ -292,7 +355,7 @@ class QuestionFactLinker(dspy.Module):
 
 
 class MedicolegalRetrieveExtract(dspy.Module):
-    """Orchestrator: search → categorize → extract → cross-page → question–fact link.
+    """Orchestrator: search → categorize → extract → cross-page → section map → Q–fact.
 
     The LM never receives the full corpus; Python owns hit lists and page budgets.
     """
@@ -308,12 +371,14 @@ class MedicolegalRetrieveExtract(dspy.Module):
         case_id: str = "case_spike",
         house_rule_canonical: str = DEFAULT_HOUSE_RULE_CANONICAL,
         cross_page_task_id: str = DEFAULT_CROSS_PAGE_TASK_ID,
+        index_event_date: str = DEFAULT_INDEX_EVENT_DATE,
     ) -> None:
         super().__init__()
         self.gen_terms = SearchTermGenerator()
         self.categorize = PageCategorizer()
         self.extract = FactExtractor()
         self.cross_page = CrossPageLinker()
+        self.section_map = SectionMapper()
         self.link = QuestionFactLinker()
         self.page_store = page_store
         self.max_hits = max_hits
@@ -323,6 +388,7 @@ class MedicolegalRetrieveExtract(dspy.Module):
         self.case_id = case_id
         self.house_rule_canonical = house_rule_canonical
         self.cross_page_task_id = cross_page_task_id
+        self.index_event_date = index_event_date
 
     def forward(
         self,
@@ -342,12 +408,16 @@ class MedicolegalRetrieveExtract(dspy.Module):
         case_id: str | None = None,
         house_rule_canonical: str | None = None,
         cross_page_task_id: str | None = None,
+        index_event_date: str | None = None,
     ) -> PipelineResult:
         budget = self.max_deep_review if max_deep_review is None else max_deep_review
         relevance = self.min_relevance if min_relevance is None else min_relevance
         resolved_case_id = case_id or self.case_id
         house_rule = house_rule_canonical or self.house_rule_canonical
         task_id = cross_page_task_id or self.cross_page_task_id
+        index_date = (
+            index_event_date if index_event_date is not None else self.index_event_date
+        )
 
         terms_pred = self.gen_terms(
             task_goal=task_goal,
@@ -426,6 +496,26 @@ class MedicolegalRetrieveExtract(dspy.Module):
 
         facts = apply_cross_page_merges(candidate_facts, merged_list, unmerged_keys)
 
+        # Section map then question–fact link — both use the same post-merge facts.
+        if facts:
+            section_pred = self.section_map(
+                case_id=resolved_case_id,
+                index_event_date=index_date or "",
+                facts_json=json.dumps(facts),
+            )
+            mappings = _loads_obj(getattr(section_pred, "mappings_json", None), [])
+            summaries = _loads_obj(
+                getattr(section_pred, "section_summaries_json", None), []
+            )
+            if not isinstance(mappings, list):
+                mappings = []
+            if not isinstance(summaries, list) or not summaries:
+                summaries = empty_section_summaries()
+        else:
+            section_pred = None
+            mappings = []
+            summaries = empty_section_summaries()
+
         questions_list = normalize_questions(
             questions,
             fallback_key=question_key,
@@ -457,6 +547,8 @@ class MedicolegalRetrieveExtract(dspy.Module):
             page_link_requests=page_link_requests
             if isinstance(page_link_requests, list)
             else [],
+            mappings=mappings,
+            section_summaries=summaries,
             links=links if isinstance(links, list) else [],
             question_coverage=coverage if isinstance(coverage, list) else [],
             raw={
@@ -464,6 +556,7 @@ class MedicolegalRetrieveExtract(dspy.Module):
                 "categorize": cats_pred,
                 "extract": facts_pred,
                 "cross_page": cross_pred,
+                "section_map": section_pred,
                 "link": link_pred,
             },
         )

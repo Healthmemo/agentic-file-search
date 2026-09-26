@@ -11,6 +11,7 @@ from .modules import (
     MedicolegalRetrieveExtract,
     PipelineResult,
     QuestionFactLinker,
+    SectionMapper,
 )
 from .postgres_store import PostgresPageStore, resolve_database_url
 from .retrieval import FixturePageStore, PageRecord, PageStore, SearchHit
@@ -26,6 +27,7 @@ __all__ = [
     "PostgresPageStore",
     "QuestionFactLinker",
     "SearchHit",
+    "SectionMapper",
     "build_page_store",
     "resolve_database_url",
     "resolve_page_store_kind",

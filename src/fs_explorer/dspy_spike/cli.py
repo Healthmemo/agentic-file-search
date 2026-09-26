@@ -20,6 +20,8 @@ from .fixtures import (
     FIXTURE_CASE_ID,
     FIXTURE_DATE_WINDOWS,
     FIXTURE_ENTITIES,
+    FIXTURE_HOUSE_RULE_CANONICAL,
+    FIXTURE_INDEX_EVENT_DATE,
     FIXTURE_MIN_RELEVANCE,
     FIXTURE_QUESTION_KEY,
     FIXTURE_QUESTION_TEXT,
@@ -38,7 +40,10 @@ from .store_factory import (
 
 app = Typer(
     add_completion=False,
-    help="Run the DSPy medicolegal retrieve→categorize→extract→link spike.",
+    help=(
+        "Run the DSPy medicolegal retrieve→extract→cross-page→section map→"
+        "question–fact spike."
+    ),
 )
 
 
@@ -112,6 +117,7 @@ def run(
         min_relevance=min_relevance,
         case_id=FIXTURE_CASE_ID,
         house_rule_canonical=FIXTURE_HOUSE_RULE_CANONICAL,
+        index_event_date=FIXTURE_INDEX_EVENT_DATE,
     )
 
     goal = task_goal or FIXTURE_TASK_GOAL
@@ -153,6 +159,7 @@ def run(
             min_relevance=min_relevance,
             case_id=FIXTURE_CASE_ID,
             house_rule_canonical=FIXTURE_HOUSE_RULE_CANONICAL,
+            index_event_date=FIXTURE_INDEX_EVENT_DATE,
         )
     except Exception as exc:  # pragma: no cover - live LM failures
         print(f"error: pipeline failed ({type(exc).__name__}): {exc}", file=sys.stderr)
@@ -177,6 +184,8 @@ def run(
         "merged_facts": result.merged_facts,
         "unmerged_fact_keys": result.unmerged_fact_keys,
         "page_link_requests": result.page_link_requests,
+        "mappings": result.mappings,
+        "section_summaries": result.section_summaries,
         "links": result.links,
         "question_coverage": result.question_coverage,
     }

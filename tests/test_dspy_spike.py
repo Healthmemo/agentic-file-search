@@ -14,6 +14,7 @@ from fs_explorer.dspy_spike.fixtures import (
     FIXTURE_CASE_ID,
     FIXTURE_DATE_WINDOWS,
     FIXTURE_ENTITIES,
+    FIXTURE_INDEX_EVENT_DATE,
     FIXTURE_QUESTION_KEY,
     FIXTURE_QUESTION_TEXT,
     FIXTURE_QUESTIONS,
@@ -28,8 +29,10 @@ from fs_explorer.dspy_spike.lm import (
     resolve_provider,
 )
 from fs_explorer.dspy_spike.modules import (
+    REPORT_SECTIONS,
     MedicolegalRetrieveExtract,
     apply_cross_page_merges,
+    empty_section_summaries,
     normalize_facts_for_linking,
     normalize_questions,
 )
@@ -318,6 +321,65 @@ class _FakeCrossPageLinker:
         )
 
 
+class _FakeSectionMapper:
+    def __call__(self, **kwargs: Any) -> dspy.Prediction:
+        facts = json.loads(kwargs["facts_json"])
+        assert kwargs.get("index_event_date") is not None
+        fact_ids = {str(f.get("fact_id") or f.get("local_fact_key")) for f in facts}
+        mappings = []
+        counts = {section: 0 for section in REPORT_SECTIONS}
+        for fact in facts:
+            fact_id = str(fact.get("fact_id") or fact.get("local_fact_key"))
+            ftype = str(fact.get("fact_type") or "")
+            if ftype == "medication":
+                primary = "medications"
+                secondary = ["treatment"]
+            elif ftype in {"injury_mechanism", "presentation"}:
+                primary = "history"
+                secondary = ["treatment"]
+            elif ftype in {"employment_status", "capacity"}:
+                primary = "employment"
+                secondary = []
+            else:
+                primary = "treatment"
+                secondary = []
+            counts[primary] += 1
+            mappings.append(
+                {
+                    "fact_id": fact_id,
+                    "primary_section": primary,
+                    "secondary_sections": secondary,
+                    "confidence": 0.9,
+                    "reason": f"Mapped {ftype or 'fact'} to {primary}",
+                }
+            )
+        assert all(m["fact_id"] in fact_ids for m in mappings)
+        summaries = []
+        for section in REPORT_SECTIONS:
+            n = counts[section]
+            coverage = (
+                "empty"
+                if n == 0
+                else "sparse"
+                if n == 1
+                else "adequate"
+                if n <= 3
+                else "rich"
+            )
+            summaries.append(
+                {
+                    "section": section,
+                    "fact_count": n,
+                    "coverage": coverage,
+                    "note": "",
+                }
+            )
+        return dspy.Prediction(
+            mappings_json=json.dumps(mappings),
+            section_summaries_json=json.dumps(summaries),
+        )
+
+
 class _FakeLinker:
     def __call__(self, **kwargs: Any) -> dspy.Prediction:
         questions = json.loads(kwargs["questions_json"])
@@ -396,6 +458,12 @@ def test_normalize_facts_and_questions_helpers() -> None:
     assert qs == [{"question_key": "Q9", "text": "Fallback question?", "ordinal": 1}]
 
 
+def test_empty_section_summaries_covers_all_sections() -> None:
+    summaries = empty_section_summaries()
+    assert [s["section"] for s in summaries] == list(REPORT_SECTIONS)
+    assert all(s["coverage"] == "empty" and s["fact_count"] == 0 for s in summaries)
+
+
 def test_apply_cross_page_merges_prefers_merged_and_unmerged() -> None:
     candidates = [
         {
@@ -435,12 +503,16 @@ def test_apply_cross_page_merges_prefers_merged_and_unmerged() -> None:
 def test_pipeline_forward_with_mocked_lm_modules() -> None:
     store = build_fixture_store()
     pipeline = MedicolegalRetrieveExtract(
-        store, max_deep_review=5, case_id=FIXTURE_CASE_ID
+        store,
+        max_deep_review=5,
+        case_id=FIXTURE_CASE_ID,
+        index_event_date=FIXTURE_INDEX_EVENT_DATE,
     )
     pipeline.gen_terms = _FakeTerms()  # type: ignore[method-assign]
     pipeline.categorize = _FakeCategorizer()  # type: ignore[method-assign]
     pipeline.extract = _FakeExtractor()  # type: ignore[method-assign]
     pipeline.cross_page = _FakeCrossPageLinker()  # type: ignore[method-assign]
+    pipeline.section_map = _FakeSectionMapper()  # type: ignore[method-assign]
     pipeline.link = _FakeLinker()  # type: ignore[method-assign]
 
     result = pipeline(
@@ -455,6 +527,7 @@ def test_pipeline_forward_with_mocked_lm_modules() -> None:
         questions=FIXTURE_QUESTIONS,
         question_key=FIXTURE_QUESTION_KEY,
         case_id=FIXTURE_CASE_ID,
+        index_event_date=FIXTURE_INDEX_EVENT_DATE,
     )
 
     assert result.queries
@@ -479,6 +552,19 @@ def test_pipeline_forward_with_mocked_lm_modules() -> None:
     assert result.facts
     assert any(f["fact_type"] == "medication" for f in result.facts)
     assert result.needs_review is False
+
+    assert result.mappings
+    by_fact = {m["fact_id"]: m for m in result.mappings}
+    assert by_fact["F_hist_merged_1"]["primary_section"] == "history"
+    assert any(m["primary_section"] == "medications" for m in result.mappings)
+    assert all(
+        m["fact_id"] in {f["fact_id"] for f in result.facts} for m in result.mappings
+    )
+    assert [s["section"] for s in result.section_summaries] == list(REPORT_SECTIONS)
+    hist = next(s for s in result.section_summaries if s["section"] == "history")
+    meds = next(s for s in result.section_summaries if s["section"] == "medications")
+    assert hist["fact_count"] >= 1
+    assert meds["fact_count"] >= 1
 
     assert result.links
     linked_qs = {lnk["question_key"] for lnk in result.links}
