@@ -1,10 +1,11 @@
-# DSPy spike — medicolegal retrieve → categorize → extract
+# DSPy spike — medicolegal retrieve → extract → link
 
 Minimal runnable spike (not the full medicolegal product).
 
 - **Local default:** Ollama via DSPy / LiteLLM (`ollama_chat/...`)
 - **Production path:** Amazon Bedrock via DSPy / LiteLLM (`bedrock/...`)
 - **Retrieval:** `FixturePageStore` by default; optional Postgres via `DSPY_PAGE_STORE=postgres`
+- **Pipeline:** search terms → snippets → categorize → extract → **question–fact link**
 
 ## Install
 
@@ -51,8 +52,8 @@ DSPY_PAGE_STORE=postgres uv run explore-dspy-spike --page-store postgres
 ## Tests (mocked LM — no live Ollama/Bedrock/Postgres)
 
 ```bash
-uv run pytest tests/test_dspy_spike.py -q
-# Optional: DSPY_PG_INTEGRATION=1 uv run pytest tests/test_dspy_spike_postgres.py -q
+uv run pytest tests/test_dspy_spike.py tests/test_dspy_spike_postgres.py -q
+# Optional: DSPY_PG_INTEGRATION=1 uv run pytest tests/test_dspy_spike_pg_integration.py -q
 ```
 
 ## Layout
@@ -60,24 +61,24 @@ uv run pytest tests/test_dspy_spike.py -q
 | File | Role |
 |------|------|
 | `lm.py` | Ollama / Bedrock provider wiring |
-| `signatures.py` | Thin DSPy signatures (search / categorize / extract) |
-| `modules.py` | Modules + `MedicolegalRetrieveExtract` orchestrator |
+| `signatures.py` | Signatures incl. `LinkQuestionsToFacts` |
+| `modules.py` | Modules + orchestrator (ends with question–fact link) |
 | `retrieval.py` | `PageStore` protocol + `FixturePageStore` |
 | `postgres_store.py` | Postgres `PageStore` + schema init / seed helpers |
 | `store_factory.py` | Fixture vs Postgres selection |
 | `schema.sql` | Minimal spike pages schema |
-| `fixtures.py` | Fake insurer question + page snippets |
+| `fixtures.py` | Fake questions + page snippets |
 | `cli.py` | Typer runner |
 
 ## Out of scope / suggested pull-in order
 
-**Still out:** planner, task manager, answer-assist, full ingest pipeline,
-optimizers, rewriting `FsExplorerWorkflow`.
+**Still out:** planner, task manager, answer-assist, cross-page linker, section mapper,
+full ingest pipeline, optimizers, rewriting `FsExplorerWorkflow`.
 
-**Suggested next (coordinator review):**
+**Pull-in order:**
 
-1. Postgres `PageStore` / production `search_pages` ← *minimal adapter in this spike*
-2. Question–fact linker
-3. Cross-page linker
+1. Postgres `PageStore` / production `search_pages` — *done (minimal)*
+2. Question–fact linker — *done for spike*
+3. Cross-page linker ← next
 4. Section mapper
 5. DSPy optimizers last

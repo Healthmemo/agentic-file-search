@@ -1,4 +1,4 @@
-"""CLI runner for the DSPy medicolegal retrieve→extract spike.
+"""CLI runner for the DSPy medicolegal retrieve→extract→link spike.
 
 Usage
 -----
@@ -17,9 +17,13 @@ from typer import Option, Typer
 
 from .fixtures import (
     FIXTURE_ALLOWED_FACT_TYPES,
+    FIXTURE_CASE_ID,
     FIXTURE_DATE_WINDOWS,
     FIXTURE_ENTITIES,
+    FIXTURE_MIN_RELEVANCE,
+    FIXTURE_QUESTION_KEY,
     FIXTURE_QUESTION_TEXT,
+    FIXTURE_QUESTIONS,
     FIXTURE_SECTION_HINT,
     FIXTURE_TARGET_CATEGORY,
     FIXTURE_TASK_GOAL,
@@ -34,7 +38,7 @@ from .store_factory import (
 
 app = Typer(
     add_completion=False,
-    help="Run the minimal DSPy medicolegal retrieve→categorize→extract spike.",
+    help="Run the DSPy medicolegal retrieve→categorize→extract→link spike.",
 )
 
 
@@ -60,13 +64,17 @@ def run(
         int,
         Option(help="Max pages sent to fact extraction"),
     ] = 4,
+    min_relevance: Annotated[
+        float,
+        Option(help="Min relevance for question–fact links"),
+    ] = FIXTURE_MIN_RELEVANCE,
     task_goal: Annotated[
         str | None,
         Option(help="Override fixture task goal"),
     ] = None,
     question: Annotated[
         str | None,
-        Option(help="Override fixture insurer question"),
+        Option(help="Override primary fixture insurer question text"),
     ] = None,
 ) -> None:
     """Run the fixture case through the DSPy pipeline."""
@@ -101,10 +109,22 @@ def run(
         max_hits=40,
         snippet_chars=500,
         max_deep_review=max_deep_review,
+        min_relevance=min_relevance,
+        case_id=FIXTURE_CASE_ID,
     )
 
     goal = task_goal or FIXTURE_TASK_GOAL
     question_text = question or FIXTURE_QUESTION_TEXT
+    questions = list(FIXTURE_QUESTIONS)
+    if question is not None:
+        # Keep Q2 text aligned with CLI override; leave Q1 as fixture gap demo
+        questions = [
+            q
+            if q["question_key"] != FIXTURE_QUESTION_KEY
+            else {**q, "text": question_text}
+            for q in questions
+        ]
+
     page_count = (
         len(store.all_page_ids()) if hasattr(store, "all_page_ids") else "unknown"
     )
@@ -113,6 +133,7 @@ def run(
     print(f"page_store={store_kind}")
     print(f"task_goal={goal}")
     print(f"question={question_text}")
+    print(f"questions={len(questions)}")
     print(f"pages={page_count}")
     print("---")
 
@@ -126,6 +147,10 @@ def run(
             section_hint=FIXTURE_SECTION_HINT,
             allowed_fact_types=FIXTURE_ALLOWED_FACT_TYPES,
             max_deep_review=max_deep_review,
+            questions=questions,
+            question_key=FIXTURE_QUESTION_KEY,
+            min_relevance=min_relevance,
+            case_id=FIXTURE_CASE_ID,
         )
     except Exception as exc:  # pragma: no cover - live LM failures
         print(f"error: pipeline failed ({type(exc).__name__}): {exc}", file=sys.stderr)
@@ -137,6 +162,7 @@ def run(
 
     summary = {
         "page_store": store_kind,
+        "case_id": FIXTURE_CASE_ID,
         "queries": result.queries,
         "stop_conditions": result.stop_conditions,
         "search_hit_page_ids": [h["page_id"] for h in result.search_hits],
@@ -146,6 +172,8 @@ def run(
         "facts": result.facts,
         "extraction_notes": result.extraction_notes,
         "needs_review": result.needs_review,
+        "links": result.links,
+        "question_coverage": result.question_coverage,
     }
     print(json.dumps(summary, indent=2))
 

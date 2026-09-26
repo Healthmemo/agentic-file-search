@@ -14,6 +14,21 @@ FIXTURE_TASK_GOAL = (
 FIXTURE_TARGET_CATEGORY = "medications"
 FIXTURE_SECTION_HINT = "medications"
 FIXTURE_ALLOWED_FACT_TYPES = "medication"
+FIXTURE_MIN_RELEVANCE = 0.55
+FIXTURE_QUESTIONS = [
+    {
+        "question_key": "Q1",
+        "ordinal": 1,
+        "text": "What is the history of the claimed injury of 14 March 2022?",
+        "likely_sections": ["history", "treatment"],
+    },
+    {
+        "question_key": "Q2",
+        "ordinal": 2,
+        "text": FIXTURE_QUESTION_TEXT,
+        "likely_sections": ["medications", "treatment"],
+    },
+]
 FIXTURE_ENTITIES = {
     "claimant_names": ["Jane Marie Doe", "Jane Doe"],
     "providers": ["Dr Patel"],

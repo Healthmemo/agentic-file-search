@@ -1,4 +1,4 @@
-"""DSPy signatures for the medicolegal retrieve → categorize → extract spike.
+"""DSPy signatures for the medicolegal retrieve → extract → link spike.
 
 Field shapes are a thin subset of docs/medicolegal-agent-prompts.md.
 JSON strings are used for nested lists so adapters parse reliably in a spike.
@@ -71,3 +71,35 @@ class ExtractFacts(dspy.Signature):
     )
     extraction_notes: str = dspy.OutputField()
     needs_review: bool = dspy.OutputField()
+
+
+class LinkQuestionsToFacts(dspy.Signature):
+    """Link extracted facts to questions with relevance, role, and coverage gaps.
+
+    Do not invent fact_ids. Prefer direct evidence. Roles: support|context|conflict.
+    """
+
+    case_id: str = dspy.InputField()
+    questions_json: str = dspy.InputField(
+        desc="JSON list of {question_key, text, ...} — only these questions"
+    )
+    facts_json: str = dspy.InputField(
+        desc=(
+            "JSON list of facts with fact_id (or local_fact_key), fact_text, fact_type, "
+            "confidence, canonical_page_id, page_number"
+        )
+    )
+    min_relevance: float = dspy.InputField(
+        desc="Minimum relevance 0–1 to include a link (default 0.55)"
+    )
+    links_json: str = dspy.OutputField(
+        desc=(
+            "JSON list of {question_key, fact_id, relevance, role "
+            "(support|context|conflict), reason}"
+        )
+    )
+    question_coverage_json: str = dspy.OutputField(
+        desc=(
+            "JSON list of {question_key, status (covered|partial|uncovered), gap_note}"
+        )
+    )

@@ -11,9 +11,12 @@ dspy = pytest.importorskip("dspy")
 
 from fs_explorer.dspy_spike.fixtures import (
     FIXTURE_ALLOWED_FACT_TYPES,
+    FIXTURE_CASE_ID,
     FIXTURE_DATE_WINDOWS,
     FIXTURE_ENTITIES,
+    FIXTURE_QUESTION_KEY,
     FIXTURE_QUESTION_TEXT,
+    FIXTURE_QUESTIONS,
     FIXTURE_SECTION_HINT,
     FIXTURE_TARGET_CATEGORY,
     FIXTURE_TASK_GOAL,
@@ -24,7 +27,11 @@ from fs_explorer.dspy_spike.lm import (
     build_lm,
     resolve_provider,
 )
-from fs_explorer.dspy_spike.modules import MedicolegalRetrieveExtract
+from fs_explorer.dspy_spike.modules import (
+    MedicolegalRetrieveExtract,
+    normalize_facts_for_linking,
+    normalize_questions,
+)
 from fs_explorer.dspy_spike.retrieval import (
     SearchQuery,
     parse_deep_review_page_ids,
@@ -206,12 +213,81 @@ class _FakeExtractor:
         )
 
 
+class _FakeLinker:
+    def __call__(self, **kwargs: Any) -> dspy.Prediction:
+        questions = json.loads(kwargs["questions_json"])
+        facts = json.loads(kwargs["facts_json"])
+        min_rel = float(kwargs["min_relevance"])
+        assert isinstance(questions, list) and questions
+        assert all("question_key" in q and "text" in q for q in questions)
+        fact_ids = {str(f.get("fact_id") or f.get("local_fact_key")) for f in facts}
+
+        links = []
+        for fact in facts:
+            fact_id = str(fact.get("fact_id") or fact.get("local_fact_key"))
+            if fact.get("fact_type") == "medication":
+                relevance = 0.91
+                if relevance >= min_rel:
+                    links.append(
+                        {
+                            "question_key": "Q2",
+                            "fact_id": fact_id,
+                            "relevance": relevance,
+                            "role": "support",
+                            "reason": "Medication dose answers Q2",
+                        }
+                    )
+        # Never invent fact ids
+        assert all(link["fact_id"] in fact_ids for link in links)
+
+        coverage = []
+        for q in questions:
+            key = q["question_key"]
+            linked = [lnk for lnk in links if lnk["question_key"] == key]
+            if not linked:
+                coverage.append(
+                    {
+                        "question_key": key,
+                        "status": "uncovered",
+                        "gap_note": "No linked facts in this spike pass",
+                    }
+                )
+            else:
+                coverage.append(
+                    {
+                        "question_key": key,
+                        "status": "partial",
+                        "gap_note": "Dose present; may need prescriber detail",
+                    }
+                )
+        return dspy.Prediction(
+            links_json=json.dumps(links),
+            question_coverage_json=json.dumps(coverage),
+        )
+
+
+def test_normalize_facts_and_questions_helpers() -> None:
+    facts = normalize_facts_for_linking(
+        [{"local_fact_key": "F1", "fact_text": "x"}, {"fact_text": "y"}]
+    )
+    assert facts[0]["fact_id"] == "F1"
+    assert facts[1]["fact_id"] == "fact_2"
+
+    qs = normalize_questions(
+        None, fallback_key="Q9", fallback_text="Fallback question?"
+    )
+    assert qs == [{"question_key": "Q9", "text": "Fallback question?", "ordinal": 1}]
+
+
 def test_pipeline_forward_with_mocked_lm_modules() -> None:
     store = build_fixture_store()
-    pipeline = MedicolegalRetrieveExtract(store, max_deep_review=3)
+    pipeline = MedicolegalRetrieveExtract(
+        store, max_deep_review=3, case_id=FIXTURE_CASE_ID
+    )
     pipeline.gen_terms = _FakeTerms()  # type: ignore[method-assign]
     pipeline.categorize = _FakeCategorizer()  # type: ignore[method-assign]
     pipeline.extract = _FakeExtractor()  # type: ignore[method-assign]
+    pipeline.link = _FakeLinker()  # type: ignore[method-assign]
 
     result = pipeline(
         task_goal=FIXTURE_TASK_GOAL,
@@ -222,6 +298,9 @@ def test_pipeline_forward_with_mocked_lm_modules() -> None:
         section_hint=FIXTURE_SECTION_HINT,
         allowed_fact_types=FIXTURE_ALLOWED_FACT_TYPES,
         max_deep_review=3,
+        questions=FIXTURE_QUESTIONS,
+        question_key=FIXTURE_QUESTION_KEY,
+        case_id=FIXTURE_CASE_ID,
     )
 
     assert result.queries
@@ -233,5 +312,15 @@ def test_pipeline_forward_with_mocked_lm_modules() -> None:
     assert len(result.selected_page_ids) <= 3
     assert result.facts
     assert result.facts[0]["fact_type"] == "medication"
+    assert result.facts[0]["fact_id"]
     assert result.facts[0]["canonical_page_id"] in result.selected_page_ids
     assert result.needs_review is False
+
+    assert result.links
+    assert result.links[0]["question_key"] == "Q2"
+    assert result.links[0]["role"] == "support"
+    assert result.links[0]["fact_id"] in {f["fact_id"] for f in result.facts}
+    assert result.question_coverage
+    statuses = {c["question_key"]: c["status"] for c in result.question_coverage}
+    assert statuses.get("Q2") in {"covered", "partial"}
+    assert statuses.get("Q1") == "uncovered"
