@@ -1,7 +1,8 @@
-"""DSPy modules: search → categorize → extract → cross-page → section map → Q–fact link.
+"""DSPy modules: plan → search → categorize → extract → cross-page → section → Q–fact.
 
-Orchestrator order after retrieval:
-extract → cross-page merge → **section map** → **question–fact link**.
+Orchestrator order:
+**plan** (optional, when letter provided) → search terms → categorize → extract →
+cross-page merge → **section map** → **question–fact link**.
 
 Section mapping and question linking both consume the same post-merge ``facts``.
 Section map runs first so drafting tags are available before question coverage;
@@ -32,6 +33,7 @@ from .signatures import (
     LinkCrossPageFacts,
     LinkQuestionsToFacts,
     MapFactSections,
+    PlanCase,
 )
 
 DEFAULT_MIN_RELEVANCE = 0.55
@@ -52,9 +54,42 @@ REPORT_SECTIONS = (
 
 
 @dataclass
-class PipelineResult:
-    """Structured result of retrieve→extract→cross-page→section map→question link."""
+class CasePlan:
+    """Structured planner output (prompt-pack case plan, JSON-string fields parsed)."""
 
+    case_id: str = ""
+    run_id: str = ""
+    entities: dict[str, Any] = field(default_factory=dict)
+    date_windows: list[dict[str, Any]] = field(default_factory=list)
+    constraints: list[str] = field(default_factory=list)
+    normalized_questions: list[dict[str, Any]] = field(default_factory=list)
+    section_priorities: list[dict[str, Any]] = field(default_factory=list)
+    initial_tasks: list[dict[str, Any]] = field(default_factory=list)
+    planner_notes: str = ""
+
+
+@dataclass
+class SearchDrivers:
+    """Values derived from a CasePlan that drive GenerateSearchTerms + extract focus."""
+
+    task_goal: str
+    question_text: str
+    question_key: str
+    entities_json: str
+    date_windows_json: str
+    questions: list[dict[str, Any]]
+    target_category: str
+    section_hint: str
+    allowed_fact_types: str
+    index_event_date: str
+    focus: str
+
+
+@dataclass
+class PipelineResult:
+    """Structured result of plan→retrieve→extract→cross-page→section→question link."""
+
+    case_plan: CasePlan | None = None
     queries: list[dict[str, Any]] = field(default_factory=list)
     stop_conditions: dict[str, Any] = field(default_factory=dict)
     search_hits: list[dict[str, Any]] = field(default_factory=list)
@@ -220,6 +255,186 @@ def coverage_label(fact_count: int) -> str:
     return "rich"
 
 
+def parse_case_plan(
+    pred: Any,
+    *,
+    case_id: str = "",
+    run_id: str = "",
+) -> CasePlan:
+    """Parse a PlanCase prediction into a CasePlan dataclass."""
+    entities = _loads_obj(getattr(pred, "entities_json", None), {})
+    date_windows = _loads_obj(getattr(pred, "date_windows_json", None), [])
+    constraints = _loads_obj(getattr(pred, "constraints_json", None), [])
+    questions = _loads_obj(getattr(pred, "normalized_questions_json", None), [])
+    section_priorities = _loads_obj(getattr(pred, "section_priorities_json", None), [])
+    initial_tasks = _loads_obj(getattr(pred, "initial_tasks_json", None), [])
+    notes = str(getattr(pred, "planner_notes", "") or "")
+
+    constraint_list = (
+        [str(c) for c in constraints] if isinstance(constraints, list) else []
+    )
+    return CasePlan(
+        case_id=case_id,
+        run_id=run_id,
+        entities=entities if isinstance(entities, dict) else {},
+        date_windows=date_windows if isinstance(date_windows, list) else [],
+        constraints=constraint_list,
+        normalized_questions=questions if isinstance(questions, list) else [],
+        section_priorities=section_priorities
+        if isinstance(section_priorities, list)
+        else [],
+        initial_tasks=initial_tasks if isinstance(initial_tasks, list) else [],
+        planner_notes=notes,
+    )
+
+
+def _index_event_from_windows(date_windows: list[dict[str, Any]]) -> str:
+    for window in date_windows:
+        if not isinstance(window, dict):
+            continue
+        label = str(window.get("label") or "").lower()
+        if "index" in label:
+            start = window.get("start")
+            if start:
+                return str(start)
+    for window in date_windows:
+        if isinstance(window, dict) and window.get("start"):
+            return str(window["start"])
+    return ""
+
+
+def _section_from_priorities(
+    section_priorities: list[dict[str, Any]],
+    questions: list[dict[str, Any]],
+    question_key: str,
+) -> str:
+    for q in questions:
+        if str(q.get("question_key")) == question_key:
+            sections = q.get("likely_sections") or []
+            if sections:
+                return str(sections[0])
+    high = [
+        str(p.get("section"))
+        for p in section_priorities
+        if isinstance(p, dict) and str(p.get("priority")) == "high" and p.get("section")
+    ]
+    if high:
+        return high[0]
+    return "history"
+
+
+def _fact_types_for_section(section: str) -> str:
+    mapping = {
+        "history": "injury_mechanism,presentation,other",
+        "past_history": "past_history,other",
+        "social": "social,other",
+        "medications": "medication,other",
+        "treatment": "treatment,presentation,other",
+        "employment": "employment_status,capacity,other",
+    }
+    return mapping.get(section, "other")
+
+
+def drivers_from_case_plan(
+    plan: CasePlan,
+    *,
+    fallback_task_goal: str = "",
+    fallback_question_text: str = "",
+    preferred_question_key: str | None = None,
+) -> SearchDrivers:
+    """Derive search/extract drivers from planner output (light task skeleton only)."""
+    questions = normalize_questions(
+        plan.normalized_questions,
+        fallback_key="Q1",
+        fallback_text=fallback_question_text or "Answer the insurer questions.",
+    )
+    by_key = {str(q["question_key"]): q for q in questions}
+
+    obtain = [
+        t
+        for t in plan.initial_tasks
+        if isinstance(t, dict) and str(t.get("task_type")) == "obtain_pages"
+    ]
+    obtain.sort(key=lambda t: (int(t.get("priority") or 99), str(t.get("task_key"))))
+
+    chosen: dict[str, Any] | None = None
+    if preferred_question_key:
+        for task in obtain:
+            if str(task.get("parent_question_key")) == preferred_question_key:
+                chosen = task
+                break
+    if chosen is None and obtain:
+        chosen = obtain[0]
+
+    if chosen is not None:
+        task_goal = str(chosen.get("goal") or fallback_task_goal).strip()
+        q_key = str(chosen.get("parent_question_key") or questions[0]["question_key"])
+    else:
+        task_goal = fallback_task_goal or (
+            plan.planner_notes[:200] if plan.planner_notes else "Obtain relevant pages"
+        )
+        q_key = preferred_question_key or (
+            questions[0]["question_key"] if questions else "Q1"
+        )
+
+    q_text = str(by_key.get(q_key, questions[0]).get("text") or fallback_question_text)
+    section = _section_from_priorities(plan.section_priorities, questions, str(q_key))
+    # Broaden search when multiple obtain_pages exist: join goals for recall
+    if len(obtain) > 1:
+        goals = [str(t.get("goal") or "").strip() for t in obtain if t.get("goal")]
+        if goals:
+            task_goal = "; ".join(goals)
+
+    fact_type_parts: list[str] = []
+    for q in questions:
+        for sec in q.get("likely_sections") or []:
+            for part in _fact_types_for_section(str(sec)).split(","):
+                if part and part not in fact_type_parts:
+                    fact_type_parts.append(part)
+    if not fact_type_parts:
+        fact_type_parts = _fact_types_for_section(section).split(",")
+
+    return SearchDrivers(
+        task_goal=task_goal or fallback_task_goal,
+        question_text=q_text,
+        question_key=str(q_key),
+        entities_json=json.dumps(plan.entities or {}),
+        date_windows_json=json.dumps(plan.date_windows or []),
+        questions=questions,
+        target_category=section,
+        section_hint=section,
+        allowed_fact_types=",".join(fact_type_parts),
+        index_event_date=_index_event_from_windows(plan.date_windows),
+        focus=f"Extract for: {task_goal or fallback_task_goal}",
+    )
+
+
+class CasePlanner(dspy.Module):
+    """Letter/brief/question planner — front of the medicolegal pipeline."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.predict = dspy.ChainOfThought(PlanCase)
+
+    def forward(
+        self,
+        case_id: str,
+        run_id: str,
+        today_iso: str,
+        letter: str,
+        brief: str = "",
+        questions_raw: str = "[]",
+    ) -> dspy.Prediction:
+        return self.predict(
+            case_id=case_id,
+            run_id=run_id,
+            today_iso=today_iso,
+            letter=letter,
+            brief=brief,
+            questions_raw=questions_raw,
+        )
+
+
 class SearchTermGenerator(dspy.Module):
     """Thin wrapper around GenerateSearchTerms."""
 
@@ -355,7 +570,10 @@ class QuestionFactLinker(dspy.Module):
 
 
 class MedicolegalRetrieveExtract(dspy.Module):
-    """Orchestrator: search → categorize → extract → cross-page → section map → Q–fact.
+    """Orchestrator: plan → search → categorize → extract → cross-page → section → Q–fact.
+
+    When ``letter`` is provided, ``CasePlanner`` runs first and drives search terms /
+    questions. Without a letter, callers pass task_goal/entities directly (compat).
 
     The LM never receives the full corpus; Python owns hit lists and page budgets.
     """
@@ -369,11 +587,13 @@ class MedicolegalRetrieveExtract(dspy.Module):
         max_deep_review: int = 8,
         min_relevance: float = DEFAULT_MIN_RELEVANCE,
         case_id: str = "case_spike",
+        run_id: str = "run_spike",
         house_rule_canonical: str = DEFAULT_HOUSE_RULE_CANONICAL,
         cross_page_task_id: str = DEFAULT_CROSS_PAGE_TASK_ID,
         index_event_date: str = DEFAULT_INDEX_EVENT_DATE,
     ) -> None:
         super().__init__()
+        self.plan = CasePlanner()
         self.gen_terms = SearchTermGenerator()
         self.categorize = PageCategorizer()
         self.extract = FactExtractor()
@@ -386,14 +606,15 @@ class MedicolegalRetrieveExtract(dspy.Module):
         self.max_deep_review = max_deep_review
         self.min_relevance = min_relevance
         self.case_id = case_id
+        self.run_id = run_id
         self.house_rule_canonical = house_rule_canonical
         self.cross_page_task_id = cross_page_task_id
         self.index_event_date = index_event_date
 
     def forward(
         self,
-        task_goal: str,
-        question_text: str,
+        task_goal: str = "",
+        question_text: str = "",
         entities_json: str = "{}",
         date_windows_json: str = "[]",
         already_tried_json: str = "[]",
@@ -406,18 +627,74 @@ class MedicolegalRetrieveExtract(dspy.Module):
         question_key: str = "Q1",
         min_relevance: float | None = None,
         case_id: str | None = None,
+        run_id: str | None = None,
         house_rule_canonical: str | None = None,
         cross_page_task_id: str | None = None,
         index_event_date: str | None = None,
+        letter: str | None = None,
+        brief: str = "",
+        questions_raw: str | None = None,
+        today_iso: str = "",
+        preferred_question_key: str | None = None,
     ) -> PipelineResult:
         budget = self.max_deep_review if max_deep_review is None else max_deep_review
         relevance = self.min_relevance if min_relevance is None else min_relevance
         resolved_case_id = case_id or self.case_id
+        resolved_run_id = run_id or self.run_id
         house_rule = house_rule_canonical or self.house_rule_canonical
         task_id = cross_page_task_id or self.cross_page_task_id
         index_date = (
             index_event_date if index_event_date is not None else self.index_event_date
         )
+
+        case_plan: CasePlan | None = None
+        plan_pred: Any | None = None
+        if letter is not None and str(letter).strip():
+            raw_questions = questions_raw
+            if raw_questions is None:
+                if questions:
+                    raw_questions = json.dumps(
+                        [
+                            {
+                                "question_key": q.get("question_key"),
+                                "text": q.get("text") or q.get("question_text"),
+                            }
+                            for q in questions
+                            if isinstance(q, dict)
+                        ]
+                    )
+                else:
+                    raw_questions = "[]"
+            plan_pred = self.plan(
+                case_id=resolved_case_id,
+                run_id=resolved_run_id,
+                today_iso=today_iso or "",
+                letter=letter,
+                brief=brief or "",
+                questions_raw=raw_questions,
+            )
+            case_plan = parse_case_plan(
+                plan_pred, case_id=resolved_case_id, run_id=resolved_run_id
+            )
+            drivers = drivers_from_case_plan(
+                case_plan,
+                fallback_task_goal=task_goal,
+                fallback_question_text=question_text,
+                preferred_question_key=preferred_question_key or question_key,
+            )
+            task_goal = drivers.task_goal or task_goal
+            question_text = drivers.question_text or question_text
+            entities_json = drivers.entities_json
+            date_windows_json = drivers.date_windows_json
+            questions = drivers.questions
+            question_key = drivers.question_key
+            target_category = drivers.target_category or target_category
+            section_hint = drivers.section_hint or section_hint
+            allowed_fact_types = drivers.allowed_fact_types or allowed_fact_types
+            if drivers.index_event_date:
+                index_date = drivers.index_event_date
+            if focus is None:
+                focus = drivers.focus
 
         terms_pred = self.gen_terms(
             task_goal=task_goal,
@@ -531,6 +808,7 @@ class MedicolegalRetrieveExtract(dspy.Module):
         coverage = _loads_obj(getattr(link_pred, "question_coverage_json", None), [])
 
         return PipelineResult(
+            case_plan=case_plan,
             queries=queries_raw if isinstance(queries_raw, list) else [],
             stop_conditions=stop_conditions
             if isinstance(stop_conditions, dict)
@@ -552,6 +830,7 @@ class MedicolegalRetrieveExtract(dspy.Module):
             links=links if isinstance(links, list) else [],
             question_coverage=coverage if isinstance(coverage, list) else [],
             raw={
+                "plan": plan_pred,
                 "terms": terms_pred,
                 "categorize": cats_pred,
                 "extract": facts_pred,

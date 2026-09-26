@@ -11,16 +11,26 @@ dspy = pytest.importorskip("dspy")
 
 from fs_explorer.dspy_spike.fixtures import (
     FIXTURE_ALLOWED_FACT_TYPES,
+    FIXTURE_BRIEF,
     FIXTURE_CASE_ID,
+    FIXTURE_CONSTRAINTS,
     FIXTURE_DATE_WINDOWS,
     FIXTURE_ENTITIES,
     FIXTURE_INDEX_EVENT_DATE,
+    FIXTURE_INITIAL_TASKS,
+    FIXTURE_LETTER,
+    FIXTURE_NORMALIZED_QUESTIONS,
     FIXTURE_QUESTION_KEY,
     FIXTURE_QUESTION_TEXT,
     FIXTURE_QUESTIONS,
+    FIXTURE_QUESTIONS_RAW,
+    FIXTURE_RUN_ID,
     FIXTURE_SECTION_HINT,
+    FIXTURE_SECTION_PRIORITIES,
     FIXTURE_TARGET_CATEGORY,
     FIXTURE_TASK_GOAL,
+    FIXTURE_TODAY_ISO,
+    build_fixture_planner_prediction,
     build_fixture_store,
 )
 from fs_explorer.dspy_spike.lm import (
@@ -30,11 +40,14 @@ from fs_explorer.dspy_spike.lm import (
 )
 from fs_explorer.dspy_spike.modules import (
     REPORT_SECTIONS,
+    CasePlan,
     MedicolegalRetrieveExtract,
     apply_cross_page_merges,
+    drivers_from_case_plan,
     empty_section_summaries,
     normalize_facts_for_linking,
     normalize_questions,
+    parse_case_plan,
 )
 from fs_explorer.dspy_spike.retrieval import (
     SearchQuery,
@@ -125,8 +138,22 @@ def test_parse_queries_and_deep_review_ids() -> None:
     assert page_ids == ["page_a", "page_b"]
 
 
+class _FakePlanner:
+    def __call__(self, **kwargs: Any) -> dspy.Prediction:
+        assert kwargs.get("letter"), "planner requires letter"
+        assert "case_id" in kwargs and "run_id" in kwargs
+        raw = kwargs.get("questions_raw") or "[]"
+        assert raw  # fixture JSON or list text
+        return dspy.Prediction(**build_fixture_planner_prediction())
+
+
+_FAKE_TERMS_LAST_KWARGS: dict[str, Any] = {}
+
+
 class _FakeTerms:
     def __call__(self, **kwargs: Any) -> dspy.Prediction:
+        _FAKE_TERMS_LAST_KWARGS.clear()
+        _FAKE_TERMS_LAST_KWARGS.update(kwargs)
         return dspy.Prediction(
             queries_json=json.dumps(
                 [
@@ -458,6 +485,60 @@ def test_normalize_facts_and_questions_helpers() -> None:
     assert qs == [{"question_key": "Q9", "text": "Fallback question?", "ordinal": 1}]
 
 
+def test_parse_case_plan_and_drivers_from_fixture() -> None:
+    pred = dspy.Prediction(**build_fixture_planner_prediction())
+    plan = parse_case_plan(pred, case_id=FIXTURE_CASE_ID, run_id=FIXTURE_RUN_ID)
+    assert plan.entities["claimant_names"]
+    assert plan.date_windows[0]["label"] == "index_event"
+    assert len(plan.normalized_questions) == 2
+    assert len(plan.initial_tasks) >= 2
+    assert any(t["task_type"] == "obtain_pages" for t in plan.initial_tasks)
+    assert plan.constraints == FIXTURE_CONSTRAINTS
+    assert plan.section_priorities == FIXTURE_SECTION_PRIORITIES
+    assert plan.planner_notes
+
+    drivers = drivers_from_case_plan(
+        plan,
+        fallback_task_goal=FIXTURE_TASK_GOAL,
+        fallback_question_text=FIXTURE_QUESTION_TEXT,
+        preferred_question_key="Q2",
+    )
+    assert (
+        "medication" in drivers.task_goal.lower()
+        or "injury" in drivers.task_goal.lower()
+    )
+    assert drivers.question_key in {"Q1", "Q2"}
+    assert "Jane" in drivers.entities_json
+    assert "2022-03-14" in drivers.date_windows_json
+    assert drivers.index_event_date == "2022-03-14"
+    assert "medication" in drivers.allowed_fact_types
+    assert len(drivers.questions) == 2
+
+
+def test_drivers_empty_tasks_fallback() -> None:
+    plan = CasePlan(
+        case_id="c",
+        run_id="r",
+        entities={"claimant_names": ["X"]},
+        date_windows=[],
+        normalized_questions=[
+            {
+                "question_key": "Q9",
+                "text": "Any meds?",
+                "likely_sections": ["medications"],
+            }
+        ],
+        initial_tasks=[],
+        planner_notes="manual fallback note",
+    )
+    drivers = drivers_from_case_plan(
+        plan, fallback_task_goal="Get meds", fallback_question_text="Any meds?"
+    )
+    assert drivers.task_goal == "Get meds"
+    assert drivers.section_hint == "medications"
+    assert drivers.question_key == "Q9"
+
+
 def test_empty_section_summaries_covers_all_sections() -> None:
     summaries = empty_section_summaries()
     assert [s["section"] for s in summaries] == list(REPORT_SECTIONS)
@@ -576,3 +657,56 @@ def test_pipeline_forward_with_mocked_lm_modules() -> None:
     statuses = {c["question_key"]: c["status"] for c in result.question_coverage}
     assert statuses.get("Q2") in {"covered", "partial"}
     assert statuses.get("Q1") in {"covered", "partial"}
+    assert result.case_plan is None
+
+
+def test_pipeline_with_case_planner_mocked() -> None:
+    store = build_fixture_store()
+    pipeline = MedicolegalRetrieveExtract(
+        store,
+        max_deep_review=5,
+        case_id=FIXTURE_CASE_ID,
+        run_id=FIXTURE_RUN_ID,
+        index_event_date=FIXTURE_INDEX_EVENT_DATE,
+    )
+    pipeline.plan = _FakePlanner()  # type: ignore[method-assign]
+    pipeline.gen_terms = _FakeTerms()  # type: ignore[method-assign]
+    pipeline.categorize = _FakeCategorizer()  # type: ignore[method-assign]
+    pipeline.extract = _FakeExtractor()  # type: ignore[method-assign]
+    pipeline.cross_page = _FakeCrossPageLinker()  # type: ignore[method-assign]
+    pipeline.section_map = _FakeSectionMapper()  # type: ignore[method-assign]
+    pipeline.link = _FakeLinker()  # type: ignore[method-assign]
+
+    result = pipeline(
+        letter=FIXTURE_LETTER,
+        brief=FIXTURE_BRIEF,
+        questions_raw=FIXTURE_QUESTIONS_RAW,
+        today_iso=FIXTURE_TODAY_ISO,
+        case_id=FIXTURE_CASE_ID,
+        run_id=FIXTURE_RUN_ID,
+        preferred_question_key=FIXTURE_QUESTION_KEY,
+        max_deep_review=5,
+    )
+
+    assert result.case_plan is not None
+    assert result.case_plan.entities["claimant_names"]
+    assert len(result.case_plan.normalized_questions) == 2
+    assert result.case_plan.initial_tasks == FIXTURE_INITIAL_TASKS
+    assert result.case_plan.normalized_questions == FIXTURE_NORMALIZED_QUESTIONS
+
+    # Planner drives search-term inputs
+    assert "Jane" in _FAKE_TERMS_LAST_KWARGS["entities_json"]
+    assert "2022-03-14" in _FAKE_TERMS_LAST_KWARGS["date_windows_json"]
+    assert _FAKE_TERMS_LAST_KWARGS["task_goal"]
+    goal_l = _FAKE_TERMS_LAST_KWARGS["task_goal"].lower()
+    assert "medication" in goal_l or "injury" in goal_l
+
+    assert result.queries
+    assert result.selected_page_ids
+    assert result.facts
+    assert result.merged_facts
+    assert result.mappings
+    assert result.links
+    linked_qs = {lnk["question_key"] for lnk in result.links}
+    assert "Q1" in linked_qs
+    assert "Q2" in linked_qs

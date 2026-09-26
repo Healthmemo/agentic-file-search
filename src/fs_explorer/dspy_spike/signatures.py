@@ -1,4 +1,4 @@
-"""DSPy signatures for the medicolegal retrieve → extract → link spike.
+"""DSPy signatures for the medicolegal plan → retrieve → extract → link spike.
 
 Field shapes are a thin subset of docs/medicolegal-agent-prompts.md.
 JSON strings are used for nested lists so adapters parse reliably in a spike.
@@ -7,6 +7,51 @@ JSON strings are used for nested lists so adapters parse reliably in a spike.
 from __future__ import annotations
 
 import dspy
+
+
+class PlanCase(dspy.Signature):
+    """Plan retrieval/analysis from insurer letter, brief, and required questions.
+
+    Do NOT invent medical-record facts (pages are not provided). Normalize every
+    supplied question; extract entities and date windows for retrieval.
+    """
+
+    case_id: str = dspy.InputField()
+    run_id: str = dspy.InputField()
+    today_iso: str = dspy.InputField(desc="Today's date YYYY-MM-DD")
+    letter: str = dspy.InputField(desc="Insurer letter text")
+    brief: str = dspy.InputField(desc="Case brief / instructions")
+    questions_raw: str = dspy.InputField(
+        desc="Required questions as JSON array or numbered list text"
+    )
+    entities_json: str = dspy.OutputField(
+        desc=(
+            "JSON object: claimant_names, dob, employers, insurers, providers, "
+            "facilities, body_parts, other"
+        )
+    )
+    date_windows_json: str = dspy.OutputField(
+        desc="JSON list of {label, start, end, precision}"
+    )
+    constraints_json: str = dspy.OutputField(
+        desc="JSON list of scope/constraint strings from letter/brief"
+    )
+    normalized_questions_json: str = dspy.OutputField(
+        desc=(
+            "JSON list of {question_key, ordinal, text, source, retrieval_intent, "
+            "likely_sections, clarity, clarification_note}"
+        )
+    )
+    section_priorities_json: str = dspy.OutputField(
+        desc="JSON list of {section, priority (high|medium|low), reason}"
+    )
+    initial_tasks_json: str = dspy.OutputField(
+        desc=(
+            "JSON list of {task_key, task_type, priority, parent_question_key, goal} "
+            "(obtain_pages|extract_facts|link_question|tag_section|needs_human)"
+        )
+    )
+    planner_notes: str = dspy.OutputField()
 
 
 class GenerateSearchTerms(dspy.Signature):
