@@ -23,9 +23,19 @@ dependencies = [
     "websockets>=14.0",
 ]
 
+[project.optional-dependencies]
+dspy = [
+    "dspy>=2.6.0",
+]
+postgres = [
+    "psycopg[binary]>=3.1.0",
+]
+
 [dependency-groups]
 dev = [
+    "dspy>=2.6.0",
     "pre-commit>=4.5.0",
+    "psycopg[binary]>=3.1.0",
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "ruff>=0.14.9",
@@ -35,3 +45,5 @@ dev = [
 [project.scripts]
 explore = "fs_explorer.main:app"
 explore-ui = "fs_explorer.server:run_server"
+explore-dspy-spike = "fs_explorer.dspy_spike.cli:main"
+explore-dspy-optimize = "fs_explorer.dspy_spike.optimize.runner:main"
