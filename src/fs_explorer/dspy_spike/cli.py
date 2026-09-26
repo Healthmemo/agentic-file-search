@@ -63,7 +63,7 @@ def run(
     max_deep_review: Annotated[
         int,
         Option(help="Max pages sent to fact extraction"),
-    ] = 4,
+    ] = 5,
     min_relevance: Annotated[
         float,
         Option(help="Min relevance for question–fact links"),
@@ -111,6 +111,7 @@ def run(
         max_deep_review=max_deep_review,
         min_relevance=min_relevance,
         case_id=FIXTURE_CASE_ID,
+        house_rule_canonical=FIXTURE_HOUSE_RULE_CANONICAL,
     )
 
     goal = task_goal or FIXTURE_TASK_GOAL
@@ -151,6 +152,7 @@ def run(
             question_key=FIXTURE_QUESTION_KEY,
             min_relevance=min_relevance,
             case_id=FIXTURE_CASE_ID,
+            house_rule_canonical=FIXTURE_HOUSE_RULE_CANONICAL,
         )
     except Exception as exc:  # pragma: no cover - live LM failures
         print(f"error: pipeline failed ({type(exc).__name__}): {exc}", file=sys.stderr)
@@ -172,6 +174,9 @@ def run(
         "facts": result.facts,
         "extraction_notes": result.extraction_notes,
         "needs_review": result.needs_review,
+        "merged_facts": result.merged_facts,
+        "unmerged_fact_keys": result.unmerged_fact_keys,
+        "page_link_requests": result.page_link_requests,
         "links": result.links,
         "question_coverage": result.question_coverage,
     }

@@ -13,8 +13,12 @@ FIXTURE_TASK_GOAL = (
 )
 FIXTURE_TARGET_CATEGORY = "medications"
 FIXTURE_SECTION_HINT = "medications"
-FIXTURE_ALLOWED_FACT_TYPES = "medication"
+FIXTURE_ALLOWED_FACT_TYPES = "medication,injury_mechanism,presentation"
 FIXTURE_MIN_RELEVANCE = 0.55
+FIXTURE_HOUSE_RULE_CANONICAL = (
+    "Prefer the page where the claim is most complete; if equal, "
+    "prefer the lowest page_number within the same document."
+)
 FIXTURE_QUESTIONS = [
     {
         "question_key": "Q1",
@@ -52,8 +56,32 @@ FIXTURE_DATE_WINDOWS = [
 
 
 def build_fixture_pages() -> list[PageRecord]:
-    """A few synthetic pages — meds, discharge, and irrelevant billing."""
+    """Synthetic pages — meds, multi-page ED injury span, billing, employment."""
     return [
+        PageRecord(
+            page_id="page_ed_1",
+            doc_id="doc_ed_2022_03_14",
+            path="hospital/ed-2022-03-14.pdf",
+            page_number=1,
+            text=(
+                "ED triage 14 March 2022. Jane Doe. "
+                "Slipped on oil in warehouse today. Continues on next page."
+            ),
+            category_hints=("history", "acute_injury"),
+            page_date_hint="2022-03-14",
+        ),
+        PageRecord(
+            page_id="page_ed_2",
+            doc_id="doc_ed_2022_03_14",
+            path="hospital/ed-2022-03-14.pdf",
+            page_number=2,
+            text=(
+                "Immediate LBP radiating to left leg. "
+                "Mechanism: slip on oil in warehouse with acute lumbar pain."
+            ),
+            category_hints=("history", "acute_injury"),
+            page_date_hint="2022-03-14",
+        ),
         PageRecord(
             page_id="page_a91",
             doc_id="doc_gp_2023_01",

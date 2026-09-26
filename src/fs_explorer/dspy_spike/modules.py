@@ -1,4 +1,4 @@
-"""DSPy modules: search → categorize → extract → question–fact link orchestrator."""
+"""DSPy modules: search → categorize → extract → cross-page → question–fact link."""
 
 from __future__ import annotations
 
@@ -21,15 +21,21 @@ from .signatures import (
     CategorizeHits,
     ExtractFacts,
     GenerateSearchTerms,
+    LinkCrossPageFacts,
     LinkQuestionsToFacts,
 )
 
 DEFAULT_MIN_RELEVANCE = 0.55
+DEFAULT_HOUSE_RULE_CANONICAL = (
+    "Prefer the page where the claim is most complete; if equal, "
+    "prefer the lowest page_number within the same document."
+)
+DEFAULT_CROSS_PAGE_TASK_ID = "T_cross_page"
 
 
 @dataclass
 class PipelineResult:
-    """Structured result of retrieve→categorize→extract→link."""
+    """Structured result of retrieve→categorize→extract→cross-page→question link."""
 
     queries: list[dict[str, Any]] = field(default_factory=list)
     stop_conditions: dict[str, Any] = field(default_factory=dict)
@@ -40,6 +46,9 @@ class PipelineResult:
     facts: list[dict[str, Any]] = field(default_factory=list)
     extraction_notes: str = ""
     needs_review: bool = False
+    merged_facts: list[dict[str, Any]] = field(default_factory=list)
+    unmerged_fact_keys: list[str] = field(default_factory=list)
+    page_link_requests: list[dict[str, Any]] = field(default_factory=list)
     links: list[dict[str, Any]] = field(default_factory=list)
     question_coverage: list[dict[str, Any]] = field(default_factory=list)
     raw: Any | None = None
@@ -107,6 +116,65 @@ def normalize_questions(
         if out:
             return out
     return [{"question_key": fallback_key, "text": fallback_text, "ordinal": 1}]
+
+
+def pages_for_candidate_facts(
+    pages_json: str,
+    candidate_facts: list[dict[str, Any]],
+) -> str:
+    """Filter selected pages down to those referenced by candidate facts only."""
+    all_pages = _loads_obj(pages_json, [])
+    if not isinstance(all_pages, list):
+        return "[]"
+    needed: set[str] = set()
+    for fact in candidate_facts:
+        for key in ("canonical_page_id",):
+            pid = str(fact.get(key) or "").strip()
+            if pid:
+                needed.add(pid)
+        for pid in fact.get("supporting_page_ids") or []:
+            if pid:
+                needed.add(str(pid))
+    if not needed:
+        return pages_json
+    filtered = [p for p in all_pages if str(p.get("page_id")) in needed]
+    return json.dumps(filtered)
+
+
+def apply_cross_page_merges(
+    candidate_facts: list[dict[str, Any]],
+    merged_facts: list[dict[str, Any]],
+    unmerged_fact_keys: list[str],
+) -> list[dict[str, Any]]:
+    """Collapse merge output into the fact list passed to question–fact linking."""
+    by_key = {
+        str(f.get("local_fact_key") or f.get("fact_id")): f for f in candidate_facts
+    }
+    out: list[dict[str, Any]] = []
+
+    for merged in merged_facts:
+        if not isinstance(merged, dict):
+            continue
+        item = dict(merged)
+        key = str(item.get("local_fact_key") or item.get("fact_id") or "").strip()
+        if not key:
+            continue
+        item["local_fact_key"] = key
+        item["fact_id"] = key
+        quotes = item.get("evidence_quotes") or []
+        if not item.get("evidence_quote") and quotes and isinstance(quotes[0], dict):
+            item["evidence_quote"] = str(quotes[0].get("quote") or "")
+        out.append(item)
+
+    for key in unmerged_fact_keys:
+        k = str(key)
+        if k in by_key:
+            out.append(by_key[k])
+
+    # Fallback: no merge plan → keep candidates
+    if not out:
+        return normalize_facts_for_linking(candidate_facts)
+    return normalize_facts_for_linking(out)
 
 
 class SearchTermGenerator(dspy.Module):
@@ -177,6 +245,30 @@ class FactExtractor(dspy.Module):
         )
 
 
+class CrossPageLinker(dspy.Module):
+    """Thin wrapper around LinkCrossPageFacts."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.predict = dspy.ChainOfThought(LinkCrossPageFacts)
+
+    def forward(
+        self,
+        case_id: str,
+        task_id: str,
+        house_rule_canonical: str,
+        candidate_facts_json: str,
+        pages_json: str,
+    ) -> dspy.Prediction:
+        return self.predict(
+            case_id=case_id,
+            task_id=task_id,
+            house_rule_canonical=house_rule_canonical,
+            candidate_facts_json=candidate_facts_json,
+            pages_json=pages_json,
+        )
+
+
 class QuestionFactLinker(dspy.Module):
     """Thin wrapper around LinkQuestionsToFacts."""
 
@@ -200,7 +292,7 @@ class QuestionFactLinker(dspy.Module):
 
 
 class MedicolegalRetrieveExtract(dspy.Module):
-    """Orchestrator: search → snippets → categorize → extract → question–fact link.
+    """Orchestrator: search → categorize → extract → cross-page → question–fact link.
 
     The LM never receives the full corpus; Python owns hit lists and page budgets.
     """
@@ -214,11 +306,14 @@ class MedicolegalRetrieveExtract(dspy.Module):
         max_deep_review: int = 8,
         min_relevance: float = DEFAULT_MIN_RELEVANCE,
         case_id: str = "case_spike",
+        house_rule_canonical: str = DEFAULT_HOUSE_RULE_CANONICAL,
+        cross_page_task_id: str = DEFAULT_CROSS_PAGE_TASK_ID,
     ) -> None:
         super().__init__()
         self.gen_terms = SearchTermGenerator()
         self.categorize = PageCategorizer()
         self.extract = FactExtractor()
+        self.cross_page = CrossPageLinker()
         self.link = QuestionFactLinker()
         self.page_store = page_store
         self.max_hits = max_hits
@@ -226,6 +321,8 @@ class MedicolegalRetrieveExtract(dspy.Module):
         self.max_deep_review = max_deep_review
         self.min_relevance = min_relevance
         self.case_id = case_id
+        self.house_rule_canonical = house_rule_canonical
+        self.cross_page_task_id = cross_page_task_id
 
     def forward(
         self,
@@ -243,10 +340,14 @@ class MedicolegalRetrieveExtract(dspy.Module):
         question_key: str = "Q1",
         min_relevance: float | None = None,
         case_id: str | None = None,
+        house_rule_canonical: str | None = None,
+        cross_page_task_id: str | None = None,
     ) -> PipelineResult:
         budget = self.max_deep_review if max_deep_review is None else max_deep_review
         relevance = self.min_relevance if min_relevance is None else min_relevance
         resolved_case_id = case_id or self.case_id
+        house_rule = house_rule_canonical or self.house_rule_canonical
+        task_id = cross_page_task_id or self.cross_page_task_id
 
         terms_pred = self.gen_terms(
             task_goal=task_goal,
@@ -289,11 +390,41 @@ class MedicolegalRetrieveExtract(dspy.Module):
             pages_json=pages_json,
         )
         facts_raw = _loads_obj(getattr(facts_pred, "facts_json", None), [])
-        facts = normalize_facts_for_linking(
+        candidate_facts = normalize_facts_for_linking(
             facts_raw if isinstance(facts_raw, list) else []
         )
         notes = str(getattr(facts_pred, "extraction_notes", "") or "")
         needs_review = _as_bool(getattr(facts_pred, "needs_review", False))
+
+        cross_pages_json = pages_for_candidate_facts(pages_json, candidate_facts)
+        cross_pred = self.cross_page(
+            case_id=resolved_case_id,
+            task_id=task_id,
+            house_rule_canonical=house_rule,
+            candidate_facts_json=json.dumps(candidate_facts),
+            pages_json=cross_pages_json,
+        )
+        merged_facts = _loads_obj(getattr(cross_pred, "merged_facts_json", None), [])
+        unmerged_keys_raw = _loads_obj(
+            getattr(cross_pred, "unmerged_fact_keys_json", None), []
+        )
+        page_link_requests = _loads_obj(
+            getattr(cross_pred, "page_link_requests_json", None), []
+        )
+        merged_list = merged_facts if isinstance(merged_facts, list) else []
+        unmerged_keys = (
+            [str(k) for k in unmerged_keys_raw]
+            if isinstance(unmerged_keys_raw, list)
+            else []
+        )
+        # If the model omitted unmerged keys and produced no merges, keep all candidates.
+        if not merged_list and not unmerged_keys:
+            unmerged_keys = [
+                str(f.get("local_fact_key") or f.get("fact_id"))
+                for f in candidate_facts
+            ]
+
+        facts = apply_cross_page_merges(candidate_facts, merged_list, unmerged_keys)
 
         questions_list = normalize_questions(
             questions,
@@ -321,12 +452,18 @@ class MedicolegalRetrieveExtract(dspy.Module):
             facts=facts,
             extraction_notes=notes,
             needs_review=needs_review,
+            merged_facts=merged_list,
+            unmerged_fact_keys=unmerged_keys,
+            page_link_requests=page_link_requests
+            if isinstance(page_link_requests, list)
+            else [],
             links=links if isinstance(links, list) else [],
             question_coverage=coverage if isinstance(coverage, list) else [],
             raw={
                 "terms": terms_pred,
                 "categorize": cats_pred,
                 "extract": facts_pred,
+                "cross_page": cross_pred,
                 "link": link_pred,
             },
         )

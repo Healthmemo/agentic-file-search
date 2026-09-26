@@ -73,6 +73,42 @@ class ExtractFacts(dspy.Signature):
     needs_review: bool = dspy.OutputField()
 
 
+class LinkCrossPageFacts(dspy.Signature):
+    """Merge facts that span multiple pages into one canonical fact representation.
+
+    House rule: prefer the page where the claim is most complete; if equal, lowest
+    page_number in the same document. Do not merge distinct claims.
+    """
+
+    case_id: str = dspy.InputField()
+    task_id: str = dspy.InputField(desc="Orchestrator task id for this merge pass")
+    house_rule_canonical: str = dspy.InputField(
+        desc="Rule for choosing canonical_page_id among spanning pages"
+    )
+    candidate_facts_json: str = dspy.InputField(
+        desc="JSON list of extracted facts (may set needs_cross_page=true)"
+    )
+    pages_json: str = dspy.InputField(
+        desc="JSON list of only pages referenced by candidate facts"
+    )
+    merged_facts_json: str = dspy.OutputField(
+        desc=(
+            "JSON list of merged facts with local_fact_key, fact_text, fact_type, "
+            "canonical_page_id, supporting_page_ids, confidence, "
+            "source_local_fact_keys, optional evidence_quotes"
+        )
+    )
+    unmerged_fact_keys_json: str = dspy.OutputField(
+        desc="JSON list of local_fact_key values left unmerged"
+    )
+    page_link_requests_json: str = dspy.OutputField(
+        desc=(
+            "JSON list of {local_fact_key, page_ids, reason} for orchestrator "
+            "page-link API (may be empty)"
+        )
+    )
+
+
 class LinkQuestionsToFacts(dspy.Signature):
     """Link extracted facts to questions with relevance, role, and coverage gaps.
 
