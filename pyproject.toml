@@ -27,11 +27,15 @@ dependencies = [
 dspy = [
     "dspy>=2.6.0",
 ]
+postgres = [
+    "psycopg[binary]>=3.1.0",
+]
 
 [dependency-groups]
 dev = [
     "dspy>=2.6.0",
     "pre-commit>=4.5.0",
+    "psycopg[binary]>=3.1.0",
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "ruff>=0.14.9",

@@ -4,13 +4,14 @@ Minimal runnable spike (not the full medicolegal product).
 
 - **Local default:** Ollama via DSPy / LiteLLM (`ollama_chat/...`)
 - **Production path:** Amazon Bedrock via DSPy / LiteLLM (`bedrock/...`)
-- **Retrieval:** in-memory fixture page store (Postgres not required)
+- **Retrieval:** `FixturePageStore` by default; optional Postgres via `DSPY_PAGE_STORE=postgres`
 
 ## Install
 
 ```bash
 uv pip install -e ".[dspy]"
-# or: uv pip install dspy
+uv pip install -e ".[dspy,postgres]"   # for Postgres adapter
+# or: uv sync --group dev
 ```
 
 ## Environment variables
@@ -25,29 +26,33 @@ uv pip install -e ".[dspy]"
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_PROFILE` | — | standard AWS creds for Bedrock |
 | `DSPY_LM_TEMPERATURE` | unset | optional float |
 | `DSPY_LM_MAX_TOKENS` | `2048` | max generation tokens |
+| `DSPY_PAGE_STORE` | `fixture` | `fixture` or `postgres` |
+| `DATABASE_URL` | unset | preferred Postgres DSN |
+| `DSPY_PG_HOST` / `PORT` / `USER` / `PASSWORD` / `DATABASE` | compose defaults | used if `DATABASE_URL` unset |
 
 Keys come from the environment via `os.getenv` — do not commit secrets.
 
 ## Run (live LM)
 
 ```bash
-# Local Ollama (start `ollama serve` and pull the model first)
+# Local Ollama + fixture store (default)
 ollama pull llama3.2
 DSPY_LM_PROVIDER=ollama uv run explore-dspy-spike
-# or
-uv run python -m fs_explorer.dspy_spike --provider ollama
 
 # Bedrock (AWS credentials required)
-DSPY_LM_PROVIDER=bedrock \
-DSPY_BEDROCK_MODEL=amazon.nova-lite-v1:0 \
-DSPY_BEDROCK_REGION=us-east-1 \
-uv run explore-dspy-spike --provider bedrock
+DSPY_LM_PROVIDER=bedrock uv run explore-dspy-spike --provider bedrock
+
+# Postgres page store (docker compose + schema)
+docker compose -f docker/docker-compose.yml up -d
+uv run python -m fs_explorer.dspy_spike.postgres_store --init-schema --seed-fixture
+DSPY_PAGE_STORE=postgres uv run explore-dspy-spike --page-store postgres
 ```
 
-## Tests (mocked LM — no live Ollama/Bedrock)
+## Tests (mocked LM — no live Ollama/Bedrock/Postgres)
 
 ```bash
 uv run pytest tests/test_dspy_spike.py -q
+# Optional: DSPY_PG_INTEGRATION=1 uv run pytest tests/test_dspy_spike_postgres.py -q
 ```
 
 ## Layout
@@ -58,11 +63,21 @@ uv run pytest tests/test_dspy_spike.py -q
 | `signatures.py` | Thin DSPy signatures (search / categorize / extract) |
 | `modules.py` | Modules + `MedicolegalRetrieveExtract` orchestrator |
 | `retrieval.py` | `PageStore` protocol + `FixturePageStore` |
+| `postgres_store.py` | Postgres `PageStore` + schema init / seed helpers |
+| `store_factory.py` | Fixture vs Postgres selection |
+| `schema.sql` | Minimal spike pages schema |
 | `fixtures.py` | Fake insurer question + page snippets |
 | `cli.py` | Typer runner |
 
-## Out of scope
+## Out of scope / suggested pull-in order
 
-Planner, task manager, cross-page linker, question–fact linker, section mapper,
-answer-assist, Postgres/`search_pages` production wiring, DSPy optimizers
-(BootstrapFewShot / MIPROv2 / GEPA), and rewriting `FsExplorerWorkflow`.
+**Still out:** planner, task manager, answer-assist, full ingest pipeline,
+optimizers, rewriting `FsExplorerWorkflow`.
+
+**Suggested next (coordinator review):**
+
+1. Postgres `PageStore` / production `search_pages` ← *minimal adapter in this spike*
+2. Question–fact linker
+3. Cross-page linker
+4. Section mapper
+5. DSPy optimizers last

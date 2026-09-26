@@ -4,7 +4,7 @@ Usage
 -----
 uv run explore-dspy-spike
 uv run python -m fs_explorer.dspy_spike
-uv run python -m fs_explorer.dspy_spike.cli --provider ollama
+uv run python -m fs_explorer.dspy_spike.cli --provider ollama --page-store fixture
 """
 
 from __future__ import annotations
@@ -23,10 +23,14 @@ from .fixtures import (
     FIXTURE_SECTION_HINT,
     FIXTURE_TARGET_CATEGORY,
     FIXTURE_TASK_GOAL,
-    build_fixture_store,
 )
 from .lm import LMConfigError, build_lm, resolve_provider
 from .modules import MedicolegalRetrieveExtract
+from .store_factory import (
+    PageStoreConfigError,
+    build_page_store,
+    resolve_page_store_kind,
+)
 
 app = Typer(
     add_completion=False,
@@ -43,6 +47,14 @@ def run(
     model: Annotated[
         str | None,
         Option(help="Override model id for the selected provider"),
+    ] = None,
+    page_store: Annotated[
+        str | None,
+        Option(help="Page store: fixture (default) or postgres"),
+    ] = None,
+    database_url: Annotated[
+        str | None,
+        Option(help="Postgres DSN override (else DATABASE_URL / DSPY_PG_*)"),
     ] = None,
     max_deep_review: Annotated[
         int,
@@ -71,7 +83,19 @@ def run(
         )
         raise SystemExit(2) from exc
 
-    store = build_fixture_store()
+    try:
+        store_kind = resolve_page_store_kind(page_store)
+        store = build_page_store(store_kind, database_url=database_url)
+    except PageStoreConfigError as exc:
+        print(f"error: page store configuration failed: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+    except Exception as exc:
+        print(
+            f"error: failed to initialize page store ({type(exc).__name__}): {exc}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2) from exc
+
     pipeline = MedicolegalRetrieveExtract(
         store,
         max_hits=40,
@@ -81,11 +105,15 @@ def run(
 
     goal = task_goal or FIXTURE_TASK_GOAL
     question_text = question or FIXTURE_QUESTION_TEXT
+    page_count = (
+        len(store.all_page_ids()) if hasattr(store, "all_page_ids") else "unknown"
+    )
 
     print(f"provider={resolved}")
+    print(f"page_store={store_kind}")
     print(f"task_goal={goal}")
     print(f"question={question_text}")
-    print(f"fixture_pages={len(store.all_page_ids())}")
+    print(f"pages={page_count}")
     print("---")
 
     try:
@@ -102,8 +130,13 @@ def run(
     except Exception as exc:  # pragma: no cover - live LM failures
         print(f"error: pipeline failed ({type(exc).__name__}): {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+    finally:
+        close = getattr(store, "close", None)
+        if callable(close):
+            close()
 
     summary = {
+        "page_store": store_kind,
         "queries": result.queries,
         "stop_conditions": result.stop_conditions,
         "search_hit_page_ids": [h["page_id"] for h in result.search_hits],

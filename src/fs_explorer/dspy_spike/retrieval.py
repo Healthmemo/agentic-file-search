@@ -54,7 +54,7 @@ class SearchQuery:
 
 @runtime_checkable
 class PageStore(Protocol):
-    """DB adapter contract — Postgres later; fixture store for the spike."""
+    """DB adapter contract — FixturePageStore or PostgresPageStore."""
 
     def search_pages(
         self,
@@ -212,7 +212,7 @@ class FixturePageStore:
                 if exclude and any(x and x in hay for x in exclude):
                     score *= 0.25
 
-                snippet = _make_snippet(page.text, terms, snippet_chars)
+                snippet = make_snippet(page.text, terms, snippet_chars)
                 existing = scored.get(page.page_id)
                 if existing is None or score > existing.score:
                     scored[page.page_id] = SearchHit(
@@ -238,7 +238,7 @@ class FixturePageStore:
         return out
 
 
-def _make_snippet(text: str, terms: list[str], max_chars: int) -> str:
+def make_snippet(text: str, terms: list[str], max_chars: int) -> str:
     lower = text.lower()
     pos = -1
     for term in terms:
